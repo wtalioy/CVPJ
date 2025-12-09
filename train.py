@@ -33,7 +33,7 @@ def train_one_epoch(
     running_loss, running_acc, total = 0.0, 0.0, 0
     progress = tqdm(loader, desc=f"Epoch {epoch} [train]", leave=False)
     for images, labels in progress:
-        images, labels = images.to(device), labels.to(device)
+        images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         optimizer.zero_grad()
         logits = model(images)
         loss = criterion(logits, labels)
@@ -60,7 +60,7 @@ def evaluate(
     model.eval()
     running_loss, running_acc, total = 0.0, 0.0, 0
     for images, labels in tqdm(loader, desc=epoch_desc, leave=False):
-        images, labels = images.to(device), labels.to(device)
+        images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
         logits = model(images)
         loss = criterion(logits, labels)
 
@@ -80,16 +80,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--val_split", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--betas", type=float, nargs="+", default=(0.937, 0.999))
+    parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Eta min for cosine annealing")
     parser.add_argument("--log_dir", type=str, default="runs", help="TensorBoard log dir root")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--model",
         type=str,
-        default="resnet18",
+        default="ferretnet",
         help="Model builder to use",
     )
     return parser.parse_args()
@@ -113,7 +114,7 @@ def main():
 
     model = build_model(args.model, num_classes=2, map_location=device).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")

@@ -6,7 +6,6 @@ from PIL import Image
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 from torchvision import transforms
-from torchvision.transforms import InterpolationMode
 
 
 IMG_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
@@ -40,8 +39,6 @@ def _gather_image_paths(root: str) -> List[Tuple[str, int]]:
 
 
 class DeepFakeDataset(Dataset):
-    """Minimal image classification dataset for the provided deepfake folders."""
-
     def __init__(self, root: str, transform: Optional[Callable] = None) -> None:
         if not os.path.isdir(root):
             raise FileNotFoundError(f"Dataset directory not found: {root}")
@@ -202,7 +199,6 @@ def create_dataloaders(
 
 
 class _SubsetWithTransform(Dataset):
-
     def __init__(self, subset: torch.utils.data.Subset, transform: Callable):
         self.subset = subset
         self.transform = transform

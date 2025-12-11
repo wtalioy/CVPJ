@@ -84,6 +84,34 @@ class DilatedConv2d(nn.Module):
         return x
 
 
+class CBAM(nn.Module):
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Conv2d(channels, channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels // reduction, channels, 1, bias=False),
+        )
+        self.sigmoid = nn.Sigmoid()
+        
+        self.conv = nn.Conv2d(2, 1, kernel_size=7, padding=3, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        channel_out = self.sigmoid(avg_out + max_out)
+        x = x * channel_out
+        
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out = torch.max(x, dim=1, keepdim=True)[0]
+        spatial_out = self.sigmoid(self.conv(torch.cat([avg_out, max_out], dim=1)))
+        x = x * spatial_out
+        
+        return x
+
+
 class DSBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, stride: int):
         super().__init__()
@@ -142,6 +170,7 @@ class Ferret(nn.Module):
             self.dim *= 2
         self.feature.append(nn.Conv2d(self.dim, self.dim, 1, 1, bias=False))
 
+        self.cbam = CBAM(channels=self.dim, reduction=16)
         self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
         self.logit = nn.Sequential(
             nn.Dropout(0.2, inplace=True),
@@ -155,6 +184,7 @@ class Ferret(nn.Module):
         x = self.cbr1(x)
         x = self.cbr2(x)
         x = self.feature(x)
+        x = self.cbam(x)
         x = self.avg_pool(x)
         x = x.view(x.size(0), -1)
         x = self.logit(x)

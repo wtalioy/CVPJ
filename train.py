@@ -71,6 +71,38 @@ def evaluate(
 
     return running_loss / total, running_acc / total
 
+def load_checkpoint(checkpoint_path: str, model: nn.Module, optimizer: optim.Optimizer, 
+                    scheduler: optim.lr_scheduler._LRScheduler, device: torch.device):
+    """加载检查点并恢复训练状态"""
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    
+    logger.info(f"Loading checkpoint from {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # 加载模型状态
+    model_state = checkpoint.get("model_state", checkpoint)
+    model.load_state_dict(model_state, strict=False)
+    
+    # 加载优化器状态
+    if "optimizer_state" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        logger.info("Optimizer state restored")
+    
+    # 加载调度器状态
+    if "scheduler_state" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state"])
+        logger.info("Scheduler state restored")
+    
+    # 获取已训练的epoch数和最佳验证准确率
+    start_epoch = checkpoint.get("epoch", 0) + 1  # 从下一个epoch开始
+    best_val_acc = checkpoint.get("val_acc", 0.0)
+    
+    # 获取保存的配置
+    saved_config = checkpoint.get("config", {})
+    logger.info(f"Checkpoint info: epoch={start_epoch-1}, val_acc={best_val_acc:.4f}")
+    
+    return start_epoch, best_val_acc, saved_config
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deepfake detection training")
@@ -90,9 +122,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="ferretnet",
+        default="artifactnet",
         help="Model builder to use",
     )
+    # 新增参数：恢复训练
+    parser.add_argument("--resume", type=str, default=None, 
+                       help="Path to checkpoint to resume training from")
+    parser.add_argument("--continue_log_dir", action="store_true", default=True,
+                       help="Continue logging to the same directory as the checkpoint")
     return parser.parse_args()
 
 
@@ -117,15 +154,43 @@ def main():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
 
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    output_dir = os.path.join(args.log_dir, f"run-{timestamp}")
+     # 恢复训练相关变量
+    start_epoch = 1
+    best_val_acc = None
+    saved_config = {}
+
+    # 如果指定了恢复训练的检查点
+    if args.resume:
+        try:
+            start_epoch, best_val_acc, saved_config = load_checkpoint(
+                args.resume, model, optimizer, scheduler, device
+            )
+            logger.info(f"Resuming training from epoch {start_epoch}")
+            
+            # 如果继续使用相同的日志目录
+            if args.continue_log_dir and os.path.dirname(args.resume):
+                output_dir = os.path.dirname(args.resume)
+                logger.info(f"Continuing logging to existing directory: {output_dir}")
+            else:
+                # 创建新的日志目录，但标明是继续训练
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                output_dir = os.path.join(args.log_dir, f"run-{timestamp}-resume")
+        except Exception as e:
+            logger.error(f"Failed to load checkpoint: {e}")
+            logger.info("Starting training from scratch")
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            output_dir = os.path.join(args.log_dir, f"run-{timestamp}")
+    else:
+        # 正常训练，创建新的日志目录
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        output_dir = os.path.join(args.log_dir, f"run-{timestamp}")
+
     writer = SummaryWriter(log_dir=output_dir)
     logger.info(f"TensorBoard logging to: {output_dir}")
 
     ckpt_path = os.path.join(output_dir, f"checkpoint_{args.model}.pth")
-    best_val_acc: Optional[float] = None
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch)
         logger.info(f"Epoch {epoch}: train_loss={train_loss:.4f} train_acc={train_acc:.4f}")
         writer.add_scalar("train/loss", train_loss, epoch)

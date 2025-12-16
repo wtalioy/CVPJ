@@ -125,13 +125,20 @@ class EarlyStopping:
         self.best_epoch = 0
         self.early_stop = False
         
+        # 新增：记录真正的历史最高值（即使没有达到门槛也会更新）
+        self.historical_best = None
+        
         # 根据模式设置比较函数
         if self.mode == 'min':
             self.compare_func = lambda a, b: a < b - self.min_delta
+            self.improvement_check = lambda a, b: a < b - self.min_delta
             self.best_score = float('inf')
+            self.historical_best = float('inf')
         else:  # 'max'
             self.compare_func = lambda a, b: a > b + self.min_delta
+            self.improvement_check = lambda a, b: a > b + self.min_delta
             self.best_score = float('-inf')
+            self.historical_best = float('-inf')
     
     def step(self, current_score, model=None, epoch=None):
         """
@@ -146,8 +153,20 @@ class EarlyStopping:
         - True: 应该继续训练
         - False: 应该停止训练
         """
-        if self.best_score is None or self.compare_func(current_score, self.best_score):
-            # 指标改善
+        # 第一步：更新历史最高记录（无论是否达到门槛）
+        if self.historical_best is None:
+            self.historical_best = current_score
+        else:
+            # 如果是max模式且当前值大于历史最高，或者min模式且当前值小于历史最低
+            if (self.mode == 'max' and current_score > self.historical_best) or \
+               (self.mode == 'min' and current_score < self.historical_best):
+                self.historical_best = current_score
+                logger.info(f"Historical best updated: {self.historical_best:.4f} at epoch {epoch}")
+        
+        # 第二步：检查是否达到改善门槛（用于早停计数器重置）
+        if self.best_score is None or self.improvement_check(current_score, self.best_score):
+            # 指标改善超过门槛：更新best_score并重置计数器
+            old_best = self.best_score if self.best_score is not None else current_score
             self.best_score = current_score
             self.best_epoch = epoch if epoch is not None else 0
             self.counter = 0
@@ -159,14 +178,21 @@ class EarlyStopping:
                     'score': current_score,
                     'epoch': epoch
                 }
-            logger.info(f"Early stopping: Improved! Best score: {self.best_score:.4f} at epoch {epoch}")
+            
+            # 记录改善信息，显示与前一个最佳值的差异
+            improvement = current_score - old_best if self.mode == 'max' else old_best - current_score
+            logger.info(f"Early stopping: Improved! New best: {self.best_score:.4f} (Δ={improvement:.4f}) at epoch {epoch}")
             return True
         else:
-            # 指标没有改善
+            # 指标没有改善超过门槛：增加计数器
             self.counter += 1
-            logger.info(f"Early stopping: No improvement for {self.counter}/{self.patience} epochs. "
-                       f"Best: {self.best_score:.4f}, Current: {current_score:.4f}")
             
+            # 计算当前值与最佳值的差距
+            gap = abs(current_score - self.best_score)
+            logger.info(f"Early stopping: No improvement for {self.counter}/{self.patience} epochs. "
+                       f"Best: {self.best_score:.4f}, Current: {current_score:.4f} (gap: {gap:.4f}, need: {self.min_delta})")
+            
+            # 检查是否触发早停
             if self.counter >= self.patience:
                 self.early_stop = True
                 logger.info(f"Early stopping triggered! Best score: {self.best_score:.4f} at epoch {self.best_epoch}")
@@ -323,7 +349,7 @@ def main():
                 if not should_continue:
                     logger.info("Early stopping triggered!")
                     
-                    # 可以在这里保存最后一次的检查点
+                    # 可以在这里保存最后一次的检查点（方便后续继续训练）
                     final_ckpt_path = os.path.join(output_dir, f"final_{args.model}_epoch{epoch}.pth")
                     torch.save(
                         {

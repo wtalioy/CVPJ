@@ -104,6 +104,76 @@ def load_checkpoint(checkpoint_path: str, model: nn.Module, optimizer: optim.Opt
     
     return start_epoch, best_val_acc, saved_config
 
+class EarlyStopping:
+    """早停类，监控验证集指标并在不再改善时停止训练"""
+    def __init__(self, patience=10, min_delta=0.001, mode='max', restore_best=True):
+        """
+        参数:
+        - patience: 耐心值，多少个epoch没有改善后停止
+        - min_delta: 最小改善量，小于这个值不算改善
+        - mode: 'max'表示监控指标越大越好（如准确率），'min'表示越小越好（如损失）
+        - restore_best: 是否在早停时恢复最佳模型
+        """
+        self.patience = patience
+        self.min_delta = min_delta
+        self.mode = mode
+        self.restore_best = restore_best
+        
+        self.counter = 0
+        self.best_score = None
+        self.best_model_state = None
+        self.best_epoch = 0
+        self.early_stop = False
+        
+        # 根据模式设置比较函数
+        if self.mode == 'min':
+            self.compare_func = lambda a, b: a < b - self.min_delta
+            self.best_score = float('inf')
+        else:  # 'max'
+            self.compare_func = lambda a, b: a > b + self.min_delta
+            self.best_score = float('-inf')
+    
+    def step(self, current_score, model=None, epoch=None):
+        """
+        执行一步早停检查
+        
+        参数:
+        - current_score: 当前监控的指标值
+        - model: 当前模型，用于保存最佳模型状态
+        - epoch: 当前epoch数
+        
+        返回:
+        - True: 应该继续训练
+        - False: 应该停止训练
+        """
+        if self.best_score is None or self.compare_func(current_score, self.best_score):
+            # 指标改善
+            self.best_score = current_score
+            self.best_epoch = epoch if epoch is not None else 0
+            self.counter = 0
+            
+            # 保存最佳模型状态
+            if model is not None and self.restore_best:
+                self.best_model_state = {
+                    'model_state': model.state_dict().copy(),
+                    'score': current_score,
+                    'epoch': epoch
+                }
+            logger.info(f"Early stopping: Improved! Best score: {self.best_score:.4f} at epoch {epoch}")
+            return True
+        else:
+            # 指标没有改善
+            self.counter += 1
+            logger.info(f"Early stopping: No improvement for {self.counter}/{self.patience} epochs. "
+                       f"Best: {self.best_score:.4f}, Current: {current_score:.4f}")
+            
+            if self.counter >= self.patience:
+                self.early_stop = True
+                logger.info(f"Early stopping triggered! Best score: {self.best_score:.4f} at epoch {self.best_epoch}")
+                return False
+            
+            return True
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deepfake detection training")
     parser.add_argument("--data_root", type=str, default="dataset", help="Root folder containing train/test splits")
@@ -130,6 +200,16 @@ def parse_args() -> argparse.Namespace:
                        help="Path to checkpoint to resume training from")
     parser.add_argument("--continue_log_dir", action="store_true", default=True,
                        help="Continue logging to the same directory as the checkpoint")
+    # 新增参数：早停
+    parser.add_argument("--early_stop", action="store_true", default=True,
+                       help="Enable early stopping")
+    parser.add_argument("--patience", type=int, default=10,
+                       help="Patience for early stopping (epochs without improvement)")
+    parser.add_argument("--min_delta", type=float, default=0.001,
+                       help="Minimum change to qualify as improvement")
+    parser.add_argument("--monitor", type=str, default="val_acc", choices=["val_acc", "val_loss"],
+                       help="Metric to monitor for early stopping")
+    
     return parser.parse_args()
 
 
@@ -190,6 +270,24 @@ def main():
 
     ckpt_path = os.path.join(output_dir, f"checkpoint_{args.model}.pth")
 
+    # 初始化早停
+    if args.early_stop:
+        if args.monitor == "val_loss":
+            early_stopper = EarlyStopping(
+                patience=args.patience,
+                min_delta=args.min_delta,
+                mode='min',  # 损失越小越好
+            )
+        else:  # val_acc
+            early_stopper = EarlyStopping(
+                patience=args.patience,
+                min_delta=args.min_delta,
+                mode='max',  # 准确率越大越好
+            )
+        logger.info(f"Early stopping enabled: patience={args.patience}, monitor={args.monitor}, min_delta={args.min_delta}")
+    else:
+        early_stopper = None
+
     for epoch in range(start_epoch, args.epochs + 1):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch)
         logger.info(f"Epoch {epoch}: train_loss={train_loss:.4f} train_acc={train_acc:.4f}")
@@ -217,8 +315,38 @@ def main():
                     ckpt_path,
                 )
                 logger.info(f"Saved checkpoint to {ckpt_path} (val_acc={val_acc:.4f})")
+            # 早停检查
+            if early_stopper is not None:
+                monitor_metric = val_loss if args.monitor == "val_loss" else val_acc
+                should_continue = early_stopper.step(monitor_metric, model, epoch)
+                
+                if not should_continue:
+                    logger.info("Early stopping triggered!")
+                    
+                    # 可以在这里保存最后一次的检查点
+                    final_ckpt_path = os.path.join(output_dir, f"final_{args.model}_epoch{epoch}.pth")
+                    torch.save(
+                        {
+                            "epoch": epoch,
+                            "model_state": model.state_dict(),
+                            "optimizer_state": optimizer.state_dict(),
+                            "scheduler_state": scheduler.state_dict(),
+                            "val_acc": val_acc,
+                            "val_loss": val_loss,
+                            "best_val_acc": best_val_acc,
+                            "early_stopped": True,
+                            "config": vars(args),
+                        },
+                        final_ckpt_path,
+                    )
+                    logger.info(f"Saved final checkpoint to {final_ckpt_path}")
+                    
+                    break  # 停止训练循环
 
         scheduler.step()
+    # 如果训练完成而没有早停，也记录信息
+    if early_stopper is not None and not early_stopper.early_stop:
+        logger.info(f"Training completed without early stopping. Best {args.monitor}: {early_stopper.best_score:.4f} at epoch {early_stopper.best_epoch}")
 
     writer.close()
 

@@ -224,10 +224,10 @@ def parse_args() -> argparse.Namespace:
     # 新增参数：恢复训练
     parser.add_argument("--resume", type=str, default=None, 
                        help="Path to checkpoint to resume training from")
-    parser.add_argument("--continue_log_dir", action="store_true", default=True,
+    parser.add_argument("--continue_log_dir", action="store_true", default=False,
                        help="Continue logging to the same directory as the checkpoint")
     # 新增参数：早停
-    parser.add_argument("--early_stop", action="store_true", default=True,
+    parser.add_argument("--early_stop", action="store_true", default=False,
                        help="Enable early stopping")
     parser.add_argument("--patience", type=int, default=10,
                        help="Patience for early stopping (epochs without improvement)")

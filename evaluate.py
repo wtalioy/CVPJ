@@ -21,59 +21,78 @@ def _is_image(fname: str) -> bool:
     return fname.lower().endswith(IMG_EXTS)
 
 
-class InferenceDataset(Dataset):
-    def __init__(self, root: str, transform: transforms.Compose):
+class TestDataset(Dataset):
+    def __init__(self, root: str, transform: transforms.Compose, labels: List[int]):
         self.root = root
         self.transform = transform
-        self.samples: List[str] = []
-        for dirpath, _, filenames in os.walk(root):
-            for fname in sorted(filenames):
-                if _is_image(fname):
-                    self.samples.append(os.path.join(dirpath, fname))
-        if len(self.samples) == 0:
-            raise RuntimeError(f"No images found under {root}")
+        self.labels = labels
+        self.samples = self._gather_image_paths(root)
+
+    def _gather_image_paths(self, root: str) -> List[Tuple[str, int]]:
+        samples: List[Tuple[str, int]] = []
+        for index, fname in enumerate(os.listdir(root)):
+            if not _is_image(fname):
+                continue
+            samples.append((os.path.join(root, fname), self.labels[index]))
+        return samples
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, index: int):
-        path = self.samples[index]
+        path, label = self.samples[index]
         with Image.open(path) as img:
             img = img.convert("RGB")
         img = self.transform(img)
-        filename = os.path.basename(path)
-        return img, filename
+        return img, label
+
+
+def load_labels(csv_path: str) -> List[int]:
+    labels: List[int] = []
+    with open(csv_path, "r") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            labels.append(int(row["label"]))
+    logger.info(f"Loaded {len(labels)} labels from {csv_path}")
+    return labels
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Deepfake inference to result.csv")
+    parser = argparse.ArgumentParser(description="Deepfake evaluation on test set with labels")
     parser.add_argument("--data_root", type=str, default="dataset", help="Root folder containing test split")
     parser.add_argument("--img_size", type=int, default=224)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--checkpoint", type=str, default="checkpoint.pth", help="Path to trained checkpoint")
-    parser.add_argument("--output", type=str, default="result.csv", help="Output CSV path")
+    parser.add_argument(
+        "--labels_csv",
+        type=str,
+        default="dataset/label_test.csv",
+        help="Path to CSV file with ground-truth labels for the test set",
+    )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
         "--model",
         type=str,
-        default="resnet18",
+        default="ferretnet",
         help="Model builder to use",
     )
     return parser.parse_args()
 
 
 @torch.no_grad()
-def run_inference():
+def run_evaluation():
     args = parse_args()
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
 
-    _, eval_tf = build_transforms(
+    labels = load_labels(args.labels_csv)
+
+    _, eval_tf, _ = build_transforms(
         img_size=args.img_size,
     )
     test_dir = os.path.join(args.data_root, "test")
-    dataset = InferenceDataset(test_dir, transform=eval_tf)
+    dataset = TestDataset(test_dir, transform=eval_tf, labels=labels)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -92,21 +111,27 @@ def run_inference():
 
     model.eval()
 
-    rows: List[Tuple[str, int]] = []
-    for images, filenames in tqdm(loader, desc="Inference", leave=False):
+    all_targets: List[int] = []
+    all_preds: List[int] = []
+
+    for images, targets in tqdm(loader, desc="Evaluating", leave=False):
         images = images.to(device)
         logits = model(images)
         preds = torch.argmax(logits, dim=1).cpu().tolist()
-        rows.extend(zip(filenames, preds))
 
-    with open(args.output, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["image_id", "label"])
-        for fname, label in rows:
-            writer.writerow([fname, label])
-    logger.info(f"Wrote predictions to {args.output} ({len(rows)} rows)")
+        batch_targets = targets.tolist()
+
+        all_targets.extend(batch_targets)
+        all_preds.extend(preds)
+
+    num_samples = len(all_targets)
+    num_correct = sum(int(t == p) for t, p in zip(all_targets, all_preds))
+    accuracy = num_correct / num_samples if num_samples > 0 else 0.0
+
+    logger.info(f"Evaluated on {num_samples} images")
+    logger.info(f"Accuracy: {accuracy * 100:.2f}% ({num_correct}/{num_samples})")
 
 
 if __name__ == "__main__":
-    run_inference()
+    run_evaluation()
 

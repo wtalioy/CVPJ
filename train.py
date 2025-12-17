@@ -78,10 +78,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--img_size", type=int, default=224)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=8)
-    parser.add_argument("--val_split", type=float, default=0.2)
+    parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--ruined_weight", type=float, default=0.8)
     parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--betas", type=float, nargs="+", default=(0.937, 0.999))
     parser.add_argument("--weight_decay", type=float, default=5e-4)
     parser.add_argument("--min_lr", type=float, default=1e-5, help="Eta min for cosine annealing")
@@ -107,10 +108,10 @@ def main():
         img_size=args.img_size,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        val_split=args.val_split,
+        val_ratio=args.val_ratio,
         seed=args.seed,
     )
-    train_loader, val_loader = create_dataloaders(cfg)
+    train_loader, val_clean_loader, val_ruined_loader = create_dataloaders(cfg)
 
     model = build_model(args.model, num_classes=2, map_location=device).to(device)
     criterion = nn.CrossEntropyLoss()
@@ -123,7 +124,7 @@ def main():
     logger.info(f"TensorBoard logging to: {output_dir}")
 
     ckpt_path = os.path.join(output_dir, f"checkpoint_{args.model}.pth")
-    best_val_acc: Optional[float] = None
+    best_score: Optional[float] = None
 
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc = train_one_epoch(model, train_loader, optimizer, criterion, device, epoch)
@@ -132,26 +133,44 @@ def main():
         writer.add_scalar("train/acc", train_acc, epoch)
         writer.add_scalar("lr", scheduler.get_last_lr()[0], epoch)
 
-        if val_loader is not None:
-            val_loss, val_acc = evaluate(model, val_loader, criterion, device, f"Epoch {epoch} [val]")
-            logger.info(f"Epoch {epoch}: val_loss={val_loss:.4f} val_acc={val_acc:.4f}")
-            writer.add_scalar("val/loss", val_loss, epoch)
-            writer.add_scalar("val/acc", val_acc, epoch)
+        clean_loss, clean_acc = evaluate(
+            model, val_clean_loader, criterion, device, f"Epoch {epoch} [val_clean]"
+        )
+        writer.add_scalar("val_clean/loss", clean_loss, epoch)
+        writer.add_scalar("val_clean/acc", clean_acc, epoch)
 
-            if best_val_acc is None or val_acc > best_val_acc:
-                best_val_acc = val_acc
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state": model.state_dict(),
-                        "optimizer_state": optimizer.state_dict(),
-                        "scheduler_state": scheduler.state_dict(),
-                        "val_acc": val_acc,
-                        "config": vars(args),
-                    },
-                    ckpt_path,
-                )
-                logger.info(f"Saved checkpoint to {ckpt_path} (val_acc={val_acc:.4f})")
+        ruined_loss, ruined_acc = evaluate(
+            model, val_ruined_loader, criterion, device, f"Epoch {epoch} [val_ruined]"
+        )
+        writer.add_scalar("val_ruined/loss", ruined_loss, epoch)
+        writer.add_scalar("val_ruined/acc", ruined_acc, epoch)
+
+        score = (1 - args.ruined_weight) * clean_acc + args.ruined_weight * ruined_acc
+
+        logger.info(
+            f"Epoch {epoch}: "
+            f"clean_loss={clean_loss:.4f} clean_acc={clean_acc:.4f} "
+            f"ruined_loss={ruined_loss:.4f} ruined_acc={ruined_acc:.4f} "
+            f"score={score:.4f}"
+        )
+        writer.add_scalar("val/score", score, epoch)
+
+        if best_score is None or score > best_score:
+            best_score = score
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "scheduler_state": scheduler.state_dict(),
+                    "score": score,
+                    "val_acc_clean": clean_acc,
+                    "val_acc_ruined": ruined_acc,
+                    "config": vars(args),
+                },
+                ckpt_path,
+            )
+            logger.info(f"Saved checkpoint to {ckpt_path} (score={score:.4f})")
 
         scheduler.step()
 

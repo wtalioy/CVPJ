@@ -163,12 +163,12 @@ def create_dataloaders(
     )
 
     base_dataset = DeepFakeDataset(train_dir, transform=None)
+    generator = torch.Generator().manual_seed(cfg.seed)
 
     if 0.0 < cfg.val_split < 1.0:
         n_total = len(base_dataset)
         n_val = int(round(cfg.val_split * n_total))
         n_train = n_total - n_val
-        generator = torch.Generator().manual_seed(cfg.seed)
         train_subset, val_subset = random_split(base_dataset, [n_train, n_val], generator=generator)
         train_ds = _SubsetWithTransform(train_subset, train_tf)
         val_ds = _SubsetWithTransform(val_subset, eval_tf)
@@ -183,6 +183,7 @@ def create_dataloaders(
         num_workers=cfg.num_workers,
         pin_memory=True,
         drop_last=False,
+        generator=generator,
     )
 
     val_loader = None
@@ -193,6 +194,7 @@ def create_dataloaders(
             shuffle=False,
             num_workers=cfg.num_workers,
             pin_memory=True,
+            generator=generator,
         )
 
     return train_loader, val_loader

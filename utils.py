@@ -1,5 +1,17 @@
 import importlib
 import torch.nn as nn
+from typing import Tuple
+import torch
+
+IMG_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+def is_image(fname: str) -> bool:
+    return fname.lower().endswith(IMG_EXTS)
+
+
+def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    preds = torch.argmax(logits, dim=1)
+    correct = (preds == targets).sum().item()
+    return correct / targets.size(0)
 
 
 def build_model(model_str: str, num_classes: int, map_location: str = "cpu") -> nn.Module:

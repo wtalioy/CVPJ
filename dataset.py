@@ -1,16 +1,16 @@
 import os
+import torch
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
-
 from PIL import Image
-import torch
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
-from torchvision.transforms import InterpolationMode
+from loguru import logger
 
 
 IMG_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
-
+def _is_image(fname: str) -> bool:
+    return fname.lower().endswith(IMG_EXTS)
 
 @dataclass
 class DataConfig:
@@ -18,24 +18,28 @@ class DataConfig:
     img_size: int = 224
     batch_size: int = 32
     num_workers: int = 16
-    val_ratio: float = 0.3  # fraction of train set used for validation
     seed: int = 42
 
 
-
-def _is_image(fname: str) -> bool:
-    return fname.lower().endswith(IMG_EXTS)
-
-
-class DeepFakeDataset(Dataset):
+class LocalDataset(Dataset):
     def __init__(self, root: str, transform: Optional[Callable] = None) -> None:
         if not os.path.isdir(root):
             raise FileNotFoundError(f"Dataset directory not found: {root}")
-        self.root = root
         self.transform = transform
         self.samples = self._gather_image_paths(root)
         if len(self.samples) == 0:
             raise RuntimeError(f"No images found under {root}. Expected 0_real/ and 1_fake/ subfolders.")
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int):
+        path, label = self.samples[index]
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+        if self.transform:
+            img = self.transform(img)
+        return img, torch.tensor(label, dtype=torch.long)
 
     def _gather_image_paths(self, root: str) -> List[Tuple[str, int]]:
         samples: List[Tuple[str, int]] = []
@@ -47,6 +51,29 @@ class DeepFakeDataset(Dataset):
                 if _is_image(fname):
                     samples.append((os.path.join(cls_dir, fname), label))
         return samples
+
+
+class GenImageDataset(Dataset):
+    def __init__(self, base_dir: str, dataset_names: List[str], split: str = "train",
+                 transform: Optional[Callable] = None) -> None:
+        self.transform = transform
+        self.samples: List[Tuple[str, int]] = []
+
+        for name in dataset_names:
+            root = os.path.join(base_dir, name, split)
+            if not os.path.isdir(root):
+                logger.warning(f"Split '{split}' not found for {name} at {root}; skipping.")
+                continue
+
+            class_map = {"nature": 0, "ai": 1}
+            for cls_name, label in class_map.items():
+                cls_dir = os.path.join(root, cls_name)
+                for fname in sorted(os.listdir(cls_dir)):
+                    if _is_image(fname):
+                        self.samples.append((os.path.join(cls_dir, fname), label))
+
+        if len(self.samples) == 0:
+            raise RuntimeError(f"No samples collected from datasets {dataset_names} under {base_dir} (split={split}).")
 
     def __len__(self) -> int:
         return len(self.samples)
@@ -134,80 +161,42 @@ class RandomMask(object):
         return tensor * mask.expand_as(tensor)
 
 
-class RandomReconstruction:
-    def __init__(self, img_size: int = 224, p=0.5):
-        self.p = p
-        self.downsample = transforms.Resize(
-            (img_size // 2, img_size // 2),
-            interpolation=InterpolationMode.BILINEAR,
-        )
-        self.upsample = transforms.Resize(
-            (img_size, img_size),
-            interpolation=InterpolationMode.BILINEAR,
-        )
-
-    def __call__(self, img):
-        if torch.rand(1).item() < self.p:
-            img = self.downsample(img)
-            img = self.upsample(img)
-        return img
-
 def build_transforms(
     img_size: int = 224,
-) -> Tuple[Callable, Callable, Callable]:
+) -> Tuple[Callable, Callable]:
     transform_train = transforms.Compose([
         transforms.RandomCrop([img_size, img_size], pad_if_needed=True),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(180),
         transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
-        RandomGaussianBlur(kernel_size=9, sigma=(1.0, 1.5), p=0.5),
-        RandomJPEG(quality=(80, 90), interval=1, p=0.5),
-        RandomReconstruction(img_size=img_size, p=0.5),
         transforms.ToTensor(),
         RandomMask(ratio=(0.00, 0.75), patch_size=16, p=0.5),
     ])
 
-    transform_eval_clean = transforms.Compose([
+    transform_eval = transforms.Compose([
         transforms.CenterCrop([img_size, img_size]),
         transforms.ToTensor(),
     ])
-
-    transform_eval_ruined = transforms.Compose([
-        transforms.CenterCrop([img_size, img_size]),
-        RandomGaussianBlur(kernel_size=9, sigma=(0.5, 1.0), p=1.0),
-        RandomJPEG(quality=(80, 90), interval=1, p=1.0),
-        RandomReconstruction(img_size=img_size, p=1.0),
-        transforms.ToTensor(),
-    ])
-
-    return transform_train, transform_eval_clean, transform_eval_ruined
+    return transform_train, transform_eval
 
 
 def create_dataloaders(
     cfg: DataConfig,
-) -> Tuple[DataLoader, Optional[DataLoader], Optional[DataLoader]]:
-    train_dir = os.path.join(cfg.data_root, "train")
-
-    train_tf, eval_clean_tf, eval_ruined_tf = build_transforms(
-        img_size=cfg.img_size,
-    )
-
-    base_dataset = DeepFakeDataset(train_dir, transform=None)
+) -> Tuple[DataLoader, DataLoader]:
+    train_tf, eval_tf = build_transforms(img_size=cfg.img_size)
     generator = torch.Generator().manual_seed(cfg.seed)
+    train_loader = _create_local_dataloader(cfg, train_tf, generator)
+    val_loader = _create_genimage_dataloader(cfg, eval_tf, generator)
+    return train_loader, val_loader
 
-    if 0.0 < cfg.val_ratio < 1.0:
-        n_total = len(base_dataset)
-        n_val = int(round(cfg.val_ratio * n_total))
-        n_train = n_total - n_val
-        train_subset, val_subset = random_split(base_dataset, [n_train, n_val], generator=generator)
-        train_ds = _SubsetWithTransform(train_subset, train_tf)
-        val_clean_ds = _SubsetWithTransform(val_subset, eval_clean_tf)
-        val_ruined_ds = _SubsetWithTransform(val_subset, eval_ruined_tf)
-    else:
-        train_ds = _SubsetWithTransform(base_dataset, train_tf)
-        val_clean_ds = None
-        val_ruined_ds = None
 
+def _create_local_dataloader(
+    cfg: DataConfig,
+    train_tf: Callable,
+    generator: torch.Generator,
+) -> DataLoader:
+    train_dir = os.path.join(cfg.data_root, "train")
+    train_ds = LocalDataset(train_dir, transform=train_tf)
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
@@ -218,40 +207,39 @@ def create_dataloaders(
         generator=generator,
     )
 
-    val_clean_loader = None
-    val_ruined_loader = None
-    if val_clean_ds is not None:
-        val_clean_loader = DataLoader(
-            val_clean_ds,
-            batch_size=cfg.batch_size,
-            shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            generator=generator,
-        )
-    if val_ruined_ds is not None:
-        val_ruined_loader = DataLoader(
-            val_ruined_ds,
-            batch_size=cfg.batch_size,
-            shuffle=False,
-            num_workers=cfg.num_workers,
-            pin_memory=True,
-            generator=generator,
-        )
-
-    return train_loader, val_clean_loader, val_ruined_loader
+    return train_loader
 
 
-class _SubsetWithTransform(Dataset):
-    def __init__(self, subset: torch.utils.data.Subset, transform: Callable):
-        self.subset = subset
-        self.transform = transform
-
-    def __len__(self) -> int:
-        return len(self.subset)
-
-    def __getitem__(self, index: int):
-        img, label = self.subset[index]
-        img = self.transform(img) if self.transform else img
-        return img, label
+def _create_genimage_dataloader(
+    cfg: DataConfig,
+    eval_tf: Callable,
+    generator: torch.Generator,
+) -> DataLoader:
+    os.environ["KAGGLEHUB_CACHE"] = cfg.data_root
+    import kagglehub
+    path = kagglehub.dataset_download('yangsangtai/tiny-genimage')
+    
+    val_dataset_names = [
+        "imagenet_ai_0508_adm",
+        "imagenet_glide",
+    ]
+    
+    logger.info(f"Loading validation datasets from {path}...")
+    val_ds = GenImageDataset(
+        path,
+        val_dataset_names,
+        split="val",
+        transform=eval_tf
+    )
+    logger.info(f"Loaded {len(val_ds)} validation samples")
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        num_workers=cfg.num_workers,
+        pin_memory=True,
+        generator=generator,
+    )
+    
+    return val_loader
 

@@ -1,9 +1,10 @@
 import argparse
 import csv
 import os
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from PIL import Image
@@ -11,27 +12,55 @@ from loguru import logger
 from tqdm import tqdm
 
 from dataset import build_transforms
-from utils import build_model
+from utils import build_model, is_image, accuracy
 
 
-IMG_EXTS: Tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp")
+@torch.no_grad()
+def evaluate(
+    model: nn.Module,
+    loader: torch.utils.data.DataLoader,
+    criterion: nn.Module,
+    device: torch.device,
+    epoch_desc: Optional[str] = None,
+) -> Tuple[float, float]:
+    model.eval()
+    running_loss, running_acc, total = 0.0, 0.0, 0
+    for images, labels in tqdm(loader, desc=epoch_desc, leave=False):
+        images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        logits = model(images)
+        loss = criterion(logits, labels)
 
+        batch_size = labels.size(0)
+        total += batch_size
+        running_loss += loss.item() * batch_size
+        running_acc += accuracy(logits, labels) * batch_size
 
-def _is_image(fname: str) -> bool:
-    return fname.lower().endswith(IMG_EXTS)
+    return running_loss / total, running_acc / total
 
 
 class TestDataset(Dataset):
-    def __init__(self, root: str, transform: transforms.Compose, labels: List[int]):
+    def __init__(self, root: str, transform: transforms.Compose, label_path: Optional[str] = None):
         self.root = root
         self.transform = transform
-        self.labels = labels
+        self.labels = self.load_labels(label_path)
         self.samples = self._gather_image_paths(root)
+
+    def load_labels(self, label_path: Optional[str] = None) -> List[int]:
+        if label_path is None:
+            label_path = os.path.join(os.path.dirname(self.root), "label_test.csv")
+        if not os.path.isfile(label_path):
+            raise FileNotFoundError(f"Label file not found: {label_path}")
+        labels: List[int] = []
+        with open(label_path, "r") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                labels.append(int(row["label"]))
+        return labels
 
     def _gather_image_paths(self, root: str) -> List[Tuple[str, int]]:
         samples: List[Tuple[str, int]] = []
-        for index, fname in enumerate(os.listdir(root)):
-            if not _is_image(fname):
+        for index, fname in enumerate(sorted(os.listdir(root))):
+            if not is_image(fname):
                 continue
             samples.append((os.path.join(root, fname), self.labels[index]))
         return samples
@@ -44,17 +73,7 @@ class TestDataset(Dataset):
         with Image.open(path) as img:
             img = img.convert("RGB")
         img = self.transform(img)
-        return img, label
-
-
-def load_labels(csv_path: str) -> List[int]:
-    labels: List[int] = []
-    with open(csv_path, "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            labels.append(int(row["label"]))
-    logger.info(f"Loaded {len(labels)} labels from {csv_path}")
-    return labels
+        return img, torch.tensor(label, dtype=torch.long)
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,10 +84,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--checkpoint", type=str, default="checkpoint.pth", help="Path to trained checkpoint")
     parser.add_argument(
-        "--labels_csv",
+        "--label_path",
         type=str,
-        default="dataset/label_test.csv",
-        help="Path to CSV file with ground-truth labels for the test set",
+        default=None,
+        help="Path to label file for the test set",
     )
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
@@ -80,19 +99,16 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-@torch.no_grad()
-def run_evaluation():
+def main():
     args = parse_args()
     device = torch.device(args.device)
     logger.info(f"Using device: {device}")
 
-    labels = load_labels(args.labels_csv)
-
-    _, eval_tf, _ = build_transforms(
+    _, eval_tf = build_transforms(
         img_size=args.img_size,
     )
     test_dir = os.path.join(args.data_root, "test")
-    dataset = TestDataset(test_dir, transform=eval_tf, labels=labels)
+    dataset = TestDataset(test_dir, transform=eval_tf, label_path=args.label_path)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -110,28 +126,12 @@ def run_evaluation():
         raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
 
     model.eval()
-
-    all_targets: List[int] = []
-    all_preds: List[int] = []
-
-    for images, targets in tqdm(loader, desc="Evaluating", leave=False):
-        images = images.to(device)
-        logits = model(images)
-        preds = torch.argmax(logits, dim=1).cpu().tolist()
-
-        batch_targets = targets.tolist()
-
-        all_targets.extend(batch_targets)
-        all_preds.extend(preds)
-
-    num_samples = len(all_targets)
-    num_correct = sum(int(t == p) for t, p in zip(all_targets, all_preds))
-    accuracy = num_correct / num_samples if num_samples > 0 else 0.0
-
-    logger.info(f"Evaluated on {num_samples} images")
-    logger.info(f"Accuracy: {accuracy * 100:.2f}% ({num_correct}/{num_samples})")
+    criterion = nn.CrossEntropyLoss()
+    loss, acc = evaluate(model, loader, criterion, device, "Evaluating")
+    logger.info(f"Evaluated on {len(loader.dataset)} images")
+    logger.info(f"Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 
 
 if __name__ == "__main__":
-    run_evaluation()
+    main()
 

@@ -168,9 +168,9 @@ def build_transforms(
         transforms.RandomCrop([img_size, img_size], pad_if_needed=True),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(180),
-        transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
         transforms.ToTensor(),
-        RandomMask(ratio=(0.00, 0.75), patch_size=16, p=0.5),
+        RandomMask(ratio=(0.00, 0.50), patch_size=16, p=0.5),
     ])
 
     transform_eval = transforms.Compose([
@@ -220,7 +220,7 @@ def _create_genimage_dataloader(
     path = kagglehub.dataset_download('yangsangtai/tiny-genimage')
     
     val_dataset_names = [
-        "imagenet_ai_0508_adm",
+        "imagenet_ai_0424_wukong",
         "imagenet_glide",
     ]
     

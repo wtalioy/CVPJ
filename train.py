@@ -47,15 +47,17 @@ def train_one_epoch(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deepfake detection training")
     parser.add_argument("--data_root", type=str, default="dataset", help="Root folder containing train/test splits")
-    parser.add_argument("--img_size", type=int, default=224)
+    parser.add_argument("--img_size", type=int, default=192)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--label_smoothing", type=float, default=0.1)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--betas", type=float, nargs="+", default=(0.937, 0.999))
-    parser.add_argument("--weight_decay", type=float, default=5e-4)
-    parser.add_argument("--min_lr", type=float, default=1e-5, help="Eta min for cosine annealing")
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--warmup_epochs", type=int, default=5)
+    parser.add_argument("--min_lr_ratio", type=float, default=0.01, help="Eta min ratio for cosine annealing")
     parser.add_argument("--log_dir", type=str, default="runs", help="TensorBoard log dir root")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument(
@@ -83,9 +85,9 @@ def main():
     train_loader, val_loader = create_dataloaders(cfg)
 
     model = build_model(args.model, num_classes=2, map_location=device).to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=args.betas)
-    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=args.min_lr)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs - args.warmup_epochs, eta_min=args.lr * args.min_lr_ratio)
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = os.path.join(args.log_dir, f"run-{timestamp}")

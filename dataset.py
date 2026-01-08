@@ -168,7 +168,7 @@ def build_transforms(
         transforms.RandomCrop([img_size, img_size], pad_if_needed=True),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(180),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
+        transforms.ColorJitter(),
         transforms.ToTensor(),
         RandomMask(ratio=(0.00, 0.50), patch_size=16, p=0.5),
     ])

@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         type=str,
-        default="ferretnet",
+        default="asrnet",
         help="Model builder to use",
     )
     return parser.parse_args()

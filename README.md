@@ -31,6 +31,7 @@ The dataset should be organized as follows:
 -   `dataset/train/0_real`: Real images for training.
 -   `dataset/train/1_fake`: Fake images for training.
 -   `dataset/test`: Images for testing.
+-   `dataset/label_test.csv`: Label file for the test set.
 
 ## Training
 

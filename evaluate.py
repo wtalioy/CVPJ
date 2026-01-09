@@ -12,7 +12,7 @@ from loguru import logger
 from tqdm import tqdm
 
 from dataset import build_transforms
-from utils import build_model, is_image, accuracy
+from utils import build_model, is_image
 
 
 @torch.no_grad()
@@ -22,20 +22,35 @@ def evaluate(
     criterion: nn.Module,
     device: torch.device,
     epoch_desc: Optional[str] = None,
+    testing: Optional[bool] = None,
 ) -> Tuple[float, float]:
     model.eval()
-    running_loss, running_acc, total = 0.0, 0.0, 0
+    running_loss, correct, total = 0.0, 0.0, 0
+    results: List[Tuple[str, int]] = []
     for images, labels in tqdm(loader, desc=epoch_desc, leave=False):
-        images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
-        logits = model(images)
+        if testing:
+            img_tensors, img_ids = images
+        else:
+            img_tensors = images
+        img_tensors, labels = img_tensors.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+        logits = model(img_tensors)
         loss = criterion(logits, labels)
 
         batch_size = labels.size(0)
         total += batch_size
         running_loss += loss.item() * batch_size
-        running_acc += accuracy(logits, labels) * batch_size
+        preds = torch.argmax(logits, dim=1)
+        correct += (preds == labels).sum().item()
+        results.extend(zip(img_ids, preds.cpu().tolist()))
 
-    return running_loss / total, running_acc / total
+    if testing:
+        with open("result.csv", "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["image_id", "label"])
+            writer.writerows(results)
+        logger.info(f"Saved results to result.csv")
+
+    return running_loss / total, correct / total
 
 
 class TestDataset(Dataset):
@@ -73,13 +88,14 @@ class TestDataset(Dataset):
         with Image.open(path) as img:
             img = img.convert("RGB")
         img = self.transform(img)
-        return img, torch.tensor(label, dtype=torch.long)
+        img_id = path.split("/")[-1]
+        return (img, img_id), torch.tensor(label, dtype=torch.long)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Deepfake evaluation on test set with labels")
     parser.add_argument("--data_root", type=str, default="dataset", help="Root folder containing test split")
-    parser.add_argument("--img_size", type=int, default=224)
+    parser.add_argument("--img_size", type=int, default=192)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--checkpoint", type=str, default="checkpoint.pth", help="Path to trained checkpoint")
@@ -127,7 +143,7 @@ def main():
 
     model.eval()
     criterion = nn.CrossEntropyLoss()
-    loss, acc = evaluate(model, loader, criterion, device, "Evaluating")
+    loss, acc = evaluate(model, loader, criterion, device, "Evaluating", testing=True)
     logger.info(f"Evaluated on {len(loader.dataset)} images")
     logger.info(f"Loss: {loss:.4f}, Accuracy: {acc:.4f}")
 

@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from dataset import DataConfig, create_dataloaders
-from utils import build_model, accuracy
+from utils import build_model
 from evaluate import evaluate
 
 
@@ -25,7 +25,7 @@ def train_one_epoch(
     epoch: int,
 ) -> Tuple[float, float]:
     model.train()
-    running_loss, running_acc, total = 0.0, 0.0, 0
+    running_loss, correct, total = 0.0, 0.0, 0
     progress = tqdm(loader, desc=f"Epoch {epoch} [train]", leave=False)
     for images, labels in progress:
         images, labels = images.to(device, non_blocking=True), labels.to(device, non_blocking=True)
@@ -38,10 +38,11 @@ def train_one_epoch(
         batch_size = labels.size(0)
         total += batch_size
         running_loss += loss.item() * batch_size
-        running_acc += accuracy(logits, labels) * batch_size
+        preds = torch.argmax(logits, dim=1)
+        correct += (preds == labels).sum().item()
         progress.set_postfix(loss=loss.item())
 
-    return running_loss / total, running_acc / total
+    return running_loss / total, correct / total
 
 
 def parse_args() -> argparse.Namespace:
